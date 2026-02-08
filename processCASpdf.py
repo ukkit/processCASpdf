@@ -1,5 +1,5 @@
 """
-# 
+#
 # This script is extension of camspdf.py script written by Suhas Bharadwaj:
 #  https://github.com/srbharadwaj/CAMSPdfExtractor
 #
@@ -34,20 +34,19 @@
 # POSSIBILITY OF SUCH DAMAGE.
 """
 
-import os
-import re
-from datetime import datetime
-from dataclasses import dataclass, asdict
 import csv
 import json
-import traceback
-import pdfplumber
+import logging
+import os
+import re
+from dataclasses import asdict, dataclass
+from datetime import datetime
+
 import pandas as pd
+import pdfplumber
 import requests
 
-
-basedir = os.path.dirname(__file__)
-
+logger = logging.getLogger(__name__)
 
 # Defining RegEx patterns
 REGULAR_BUY_TXN = r"(?P<date>\d+\-\S+\-\d+)\s+(?P<txn>.*)\s+(?P<amount>[0-9]+\.[0-9]*)\s+(?P<units>[0-9]+\.[0-9]*)\s+(?P<nav>[0-9]+\.[0-9]*)\s+(?P<unitbalance>[0-9]+\.[0-9]*).*"
@@ -55,6 +54,137 @@ REGULAR_SELL_TXN = r"(?P<date>\d+\-\S+\-\d+)\s+(?P<txn>.*)\s+(?P<amount>\([0-9]+
 SEGR_BUY_TXN = r"(?P<date>\d+\-\S+\-\d+)\s+(?P<txn>.*)\s+(?P<units>[0-9]+\.[0-9]*)\s+(?P<unitbalance>[0-9]+\.[0-9]*).*"
 FOLIO_PAN = r"^Folio No:\s+(?P<folio_num>.*)\s+PAN:\s+(?P<pan>[A-Z,0-9]{10})"
 FNAME_ISIN = r"^(?P<fund_name>.*?)(?:\s*-\s*|\s+)ISIN:\s*(?P<isin>INF[A-Z0-9]{9}).*"
+
+# Fund name indicator patterns used to identify lines containing mutual fund names
+_FUND_NAME_PATTERNS = (
+    "PAMP-",
+    "-Growth",
+    "-Direct",
+    "-Regular",
+    "-Plan",
+    "-Fund",
+    "-HDFC",
+    "-ICICI",
+    "-SBI",
+    "-Axis",
+    "-Kotak",
+    "-Nippon",
+    "-Tata",
+    "-UTI",
+    "-Aditya",
+    "-Mirae",
+    "-Parag",
+    "-Edelweiss",
+    "-DSP",
+    "-Invesco",
+    "-PGIM",
+    "-HSBC",
+    "-BNP",
+    "-Franklin",
+    "-IDFC",
+    "-Reliance",
+    "-L&T",
+    "-Mahindra",
+    "-Canara",
+    "-Indiabulls",
+    "-Motilal",
+    "-Quantum",
+    "-Sundaram",
+    "-Taurus",
+    "-JM",
+    "-Principal",
+    "-Baroda",
+    "-LIC",
+    "-BOI",
+    "-Union",
+    "-IDBI",
+    "-IIFL",
+    "-PPFAS",
+    "-WhiteOak",
+    "-Samco",
+    "-Groww",
+    "-KFintech",
+    "-CAMS",
+    "-Karvy",
+    "-NSDL",
+    "-CDSL",
+    "-SEBI",
+    "-AMFI",
+    "-RBI",
+    "-NSE",
+    "-BSE",
+    "-MCX",
+    "-NCDEX",
+    "-MCX-SX",
+    "-OTCEI",
+    "-ISE",
+    "-USE",
+    "-CSE",
+    "-DSE",
+    "-MSE",
+    "-VSE",
+    "-PSE",
+    "-ASE",
+    "-KSE",
+    "-TSE",
+    "-SSE",
+    "-HSE",
+    "-LSE",
+    "-NYSE",
+    "-NASDAQ",
+    "-HKSE",
+    "-SGX",
+    "-ASX",
+    "-TSX",
+    "-FSE",
+    "-XETRA",
+    "-Euronext",
+)
+
+
+def _has_fund_name_pattern(line):
+    """Check if a line contains a known mutual fund name indicator pattern."""
+    return any(pattern in line for pattern in _FUND_NAME_PATTERNS)
+
+
+def _clean_fund_name(raw_name):
+    """Extract and clean fund name from raw text.
+
+    Splits on the first hyphen and takes the right side,
+    strips trailing hyphens/spaces, and removes "Registrar : CAMS".
+    """
+    name = raw_name.strip()
+    if "-" in name:
+        name = name.split("-", 1)[1].strip()
+        name = name.rstrip("- ").strip()
+    if "Registrar : CAMS" in name:
+        name = name.replace("Registrar : CAMS", "").strip()
+    return name
+
+
+def _clean_fund_name_smart(raw_name):
+    """Extract fund name using last-hyphen strategy with fallback.
+
+    Tries splitting on the last hyphen first. If the result is too short
+    or starts with '(', falls back to splitting on the first hyphen.
+    """
+    name = raw_name.strip()
+    if "-" in name:
+        last_part = name.split("-")[-1].strip()
+        if len(last_part) < 5 or last_part.startswith("("):
+            parts = name.split("-", 1)
+            name = parts[1].strip() if len(parts) > 1 else last_part
+        else:
+            name = last_part
+    if "Registrar : CAMS" in name:
+        name = name.replace("Registrar : CAMS", "").strip()
+    return name
+
+
+def _extract_isin(text):
+    """Extract an ISIN (INF + 9 alphanumeric chars) from text. Returns match or empty string."""
+    match = re.search(r"INF[A-Z0-9]{9}", text)
+    return match.group(0) if match else ""
 
 
 @dataclass
@@ -69,22 +199,15 @@ class _EachLine:
 
 class _LatestNav:
     def __init__(self) -> None:
-        self.alldata = []
+        self.alldata: list[_EachLine] = []
         url = "https://portal.amfiindia.com/spages/NAVopen.txt"
         response = requests.get(url, timeout=60)
         if response.status_code == 200:
-            # Parse the HTML content of the page
             html_content = response.text
-            # print(html_content)
             alllines = html_content.splitlines()
-            # print(len(alllines))
-            # print(alllines[0])
             self.process(alllines)
         else:
-            print(
-                f"Failed to retrieve the latest nav page. Status code: {response.status_code}"
-            )
-            # You can handle errors or exit the script here
+            logger.warning("Failed to retrieve the latest nav page. Status code: %s", response.status_code)
 
     def process(self, alllines):
         for eachline in alllines:
@@ -126,10 +249,10 @@ class _ProcessTextFile:
         self,
         alllines="text.txt",
     ) -> None:
-        self.alldata = []
+        self.alldata: list[_FundDetails] = []
         self.lnav = _LatestNav()
         if alllines == "text.txt":
-            with open(alllines, "r") as f:
+            with open(alllines) as f:
                 self.alllines = f.readlines()
         else:
             self.alllines = alllines
@@ -139,274 +262,120 @@ class _ProcessTextFile:
         """Extract fund name and ISIN from potentially multi-line text"""
         fund_name = ""
         isin = ""
-        
-        # Look for ISIN in the current line
+
         current_line = lines[start_idx].strip()
-        print(f"Checking line for ISIN: {current_line}")
-        
+        logger.debug("Checking line for ISIN: %s", current_line)
+
         # Check if the current line ends with a hyphen, indicating ISIN might be on the next line
-        if current_line.endswith("-"):
-            # Check the next line for ISIN
-            if start_idx + 1 < len(lines):
-                next_line = lines[start_idx + 1].strip()
-                print(f"Line ends with hyphen, checking next line: {next_line}")
-                
-                # Check if the next line starts with "ISIN:"
-                if next_line.startswith("ISIN:"):
-                    # Extract fund name from the current line (remove trailing hyphen)
-                    potential_fund_name = current_line.rstrip("-").strip()
-                    
-                    # Handle fund names with hyphens
-                    if "-" in potential_fund_name:
-                        # Take everything after the first hyphen
-                        fund_name = potential_fund_name.split("-", 1)[1].strip()
-                        # Trim any trailing hyphens and spaces
-                        fund_name = fund_name.rstrip("- ").strip()
-                    else:
-                        fund_name = potential_fund_name.strip()
-                    
-                    # Remove "Registrar : CAMS" if present
-                    if "Registrar : CAMS" in fund_name:
-                        fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                    
-                    print(f"Extracted fund_name from hyphen-ended line: {fund_name}")
-                    
-                    # Extract ISIN from the next line
-                    isin_part = next_line.replace("ISIN:", "").strip()
-                    isin_match = re.search(r'INF[A-Z0-9]{9}', isin_part)
-                    if isin_match:
-                        isin = isin_match.group(0)
-                        return fund_name, isin, start_idx + 1
-        
+        if current_line.endswith("-") and start_idx + 1 < len(lines):
+            next_line = lines[start_idx + 1].strip()
+            logger.debug("Line ends with hyphen, checking next line: %s", next_line)
+
+            if next_line.startswith("ISIN:"):
+                potential_fund_name = current_line.rstrip("-").strip()
+                fund_name = _clean_fund_name(potential_fund_name)
+                logger.debug("Extracted fund_name from hyphen-ended line: %s", fund_name)
+
+                isin_part = next_line.replace("ISIN:", "").strip()
+                isin = _extract_isin(isin_part)
+                if isin:
+                    return fund_name, isin, start_idx + 1
+
         # Try to find ISIN in the current line
         if "ISIN:" in current_line:
-            # Split by ISIN: and extract fund name
             parts = current_line.split("ISIN:")
             if len(parts) > 1:
-                # Extract fund name - take everything after the first hyphen
-                potential_fund_name = parts[0].strip()
-                
-                # Handle fund names with hyphens
-                if "-" in potential_fund_name:
-                    # Take everything after the first hyphen
-                    fund_name = potential_fund_name.split("-", 1)[1].strip()
-                    # Trim any trailing hyphens and spaces
-                    fund_name = fund_name.rstrip("- ").strip()
-                else:
-                    fund_name = potential_fund_name.strip()
-                
-                # Remove "Registrar : CAMS" if present
-                if "Registrar : CAMS" in fund_name:
-                    fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                
-                print(f"Extracted fund_name: {fund_name}")
-                
+                fund_name = _clean_fund_name(parts[0])
+                logger.debug("Extracted fund_name: %s", fund_name)
+
                 # Look for ISIN in the same line
                 isin_part = parts[1].strip()
-                isin_match = re.search(r'INF[A-Z0-9]{9}', isin_part)
-                if isin_match:
-                    isin = isin_match.group(0)
+                isin = _extract_isin(isin_part)
+                if isin:
                     return fund_name, isin, start_idx
-                
-                # Check if the line ends with "INF" or contains "INF" followed by something else
-                if isin_part.endswith("INF") or "INF" in isin_part:
-                    # The ISIN might be split across lines
-                    # Check the next line for the rest of the ISIN
-                    if start_idx + 1 < len(lines):
-                        next_line = lines[start_idx + 1].strip()
-                        print(f"Found 'INF' in current line, checking next line: {next_line}")
-                        
-                        # Look for a pattern that might be the rest of the ISIN (9 alphanumeric characters)
-                        isin_rest_match = re.search(r'([A-Z0-9]{9})', next_line)
-                        if isin_rest_match:
-                            isin_rest = isin_rest_match.group(1)
-                            isin = f"INF{isin_rest}"
-                            print(f"Found split ISIN: {isin}")
-                            return fund_name, isin, start_idx + 1
-        
+
+                # Check if ISIN is split across lines
+                if (isin_part.endswith("INF") or "INF" in isin_part) and start_idx + 1 < len(lines):
+                    next_line = lines[start_idx + 1].strip()
+                    logger.debug("Found 'INF' in current line, checking next line: %s", next_line)
+
+                    isin_rest_match = re.search(r"([A-Z0-9]{9})", next_line)
+                    if isin_rest_match:
+                        isin = f"INF{isin_rest_match.group(1)}"
+                        logger.debug("Found split ISIN: %s", isin)
+                        return fund_name, isin, start_idx + 1
+
         # If ISIN not found in current line, check next line
         if start_idx + 1 < len(lines):
             next_line = lines[start_idx + 1].strip()
-            print(f"Checking next line for ISIN: {next_line}")
-            
-            # Look for ISIN in the next line
+            logger.debug("Checking next line for ISIN: %s", next_line)
+
             if "ISIN:" in next_line:
-                # Check if the current line contains a fund name pattern
-                # Look for patterns like "PAMP-" or other fund name indicators
-                if ("PAMP-" in current_line or "-Growth" in current_line or "-Direct" in current_line or 
-                    "-Regular" in current_line or "-Plan" in current_line or "-Fund" in current_line or
-                    "-HDFC" in current_line or "-ICICI" in current_line or "-SBI" in current_line or
-                    "-Axis" in current_line or "-Kotak" in current_line or "-Nippon" in current_line or
-                    "-Tata" in current_line or "-UTI" in current_line or "-Aditya" in current_line or
-                    "-Mirae" in current_line or "-Parag" in current_line or "-Edelweiss" in current_line or
-                    "-DSP" in current_line or "-Invesco" in current_line or "-PGIM" in current_line or
-                    "-HSBC" in current_line or "-BNP" in current_line or "-Franklin" in current_line or
-                    "-IDFC" in current_line or "-Reliance" in current_line or "-L&T" in current_line or
-                    "-Mahindra" in current_line or "-Canara" in current_line or "-Indiabulls" in current_line or
-                    "-Motilal" in current_line or "-Quantum" in current_line or "-Sundaram" in current_line or
-                    "-Taurus" in current_line or "-JM" in current_line or "-Principal" in current_line or
-                    "-Baroda" in current_line or "-LIC" in current_line or "-BOI" in current_line or
-                    "-Union" in current_line or "-IDBI" in current_line or "-IIFL" in current_line or
-                    "-PPFAS" in current_line or "-WhiteOak" in current_line or "-Samco" in current_line or
-                    "-Groww" in current_line or "-KFintech" in current_line or "-CAMS" in current_line or
-                    "-Karvy" in current_line or "-NSDL" in current_line or "-CDSL" in current_line or
-                    "-SEBI" in current_line or "-AMFI" in current_line or "-RBI" in current_line or
-                    "-NSE" in current_line or "-BSE" in current_line or "-MCX" in current_line or
-                    "-NCDEX" in current_line or "-MCX-SX" in current_line or "-OTCEI" in current_line or
-                    "-ISE" in current_line or "-USE" in current_line or "-CSE" in current_line or
-                    "-DSE" in current_line or "-MSE" in current_line or "-VSE" in current_line or
-                    "-PSE" in current_line or "-ASE" in current_line or "-KSE" in current_line or
-                    "-TSE" in current_line or "-SSE" in current_line or "-HSE" in current_line or
-                    "-LSE" in current_line or "-NYSE" in current_line or "-NASDAQ" in current_line or
-                    "-LSE" in current_line or "-TSE" in current_line or "-HKSE" in current_line or
-                    "-SGX" in current_line or "-ASX" in current_line or "-TSX" in current_line or
-                    "-FSE" in current_line or "-XETRA" in current_line or "-Euronext" in current_line or
-                    "-LSE" in current_line or "-TSE" in current_line or "-HKSE" in current_line or
-                    "-SGX" in current_line or "-ASX" in current_line or "-TSX" in current_line or
-                    "-FSE" in current_line or "-XETRA" in current_line or "-Euronext" in current_line):
-                    # Extract fund name from the current line
-                    potential_fund_name = current_line.strip()
-                    
-                    # Handle fund names with hyphens
-                    if "-" in potential_fund_name:
-                        # Take everything after the first hyphen
-                        fund_name = potential_fund_name.split("-", 1)[1].strip()
-                        # Trim any trailing hyphens and spaces
-                        fund_name = fund_name.rstrip("- ").strip()
-                    else:
-                        fund_name = potential_fund_name.strip()
-                    
-                    # Remove "Registrar : CAMS" if present
-                    if "Registrar : CAMS" in fund_name:
-                        fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                    
-                    print(f"Extracted fund_name from current line (ISIN on next line): {fund_name}")
-                    
-                    # Extract ISIN from next line
+                if _has_fund_name_pattern(current_line):
+                    fund_name = _clean_fund_name(current_line)
+                    logger.debug("Extracted fund_name from current line (ISIN on next line): %s", fund_name)
+
                     isin_part = next_line.replace("ISIN:", "").strip()
-                    isin_match = re.search(r'INF[A-Z0-9]{9}', isin_part)
-                    if isin_match:
-                        isin = isin_match.group(0)
+                    isin = _extract_isin(isin_part)
+                    if isin:
+                        return fund_name, isin, start_idx + 1
+                elif (
+                    next_line.startswith("(Non-Demat)")
+                    or next_line.startswith("(Demat)")
+                    or next_line.startswith("(Physical)")
+                ):
+                    fund_name = _clean_fund_name(current_line)
+                    logger.debug("Extracted fund_name from current line (Non-Demat on next line): %s", fund_name)
+
+                    isin_part = next_line.replace("ISIN:", "").strip()
+                    isin = _extract_isin(isin_part)
+                    if isin:
                         return fund_name, isin, start_idx + 1
                 else:
-                    # If the current line doesn't look like a fund name, try to extract from the next line
-                    # But first check if the next line starts with "(Non-Demat)" or similar
-                    if next_line.startswith("(Non-Demat)") or next_line.startswith("(Demat)") or next_line.startswith("(Physical)"):
-                        # Extract fund name from the current line
-                        potential_fund_name = current_line.strip()
-                        
-                        # Handle fund names with hyphens
-                        if "-" in potential_fund_name:
-                            # Take everything after the first hyphen
-                            fund_name = potential_fund_name.split("-", 1)[1].strip()
-                            # Trim any trailing hyphens and spaces
-                            fund_name = fund_name.rstrip("- ").strip()
-                        else:
-                            fund_name = potential_fund_name.strip()
-                        
-                        # Remove "Registrar : CAMS" if present
-                        if "Registrar : CAMS" in fund_name:
-                            fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                        
-                        print(f"Extracted fund_name from current line (Non-Demat on next line): {fund_name}")
-                        
-                        # Extract ISIN from next line
-                        isin_part = next_line.replace("ISIN:", "").strip()
-                        isin_match = re.search(r'INF[A-Z0-9]{9}', isin_part)
-                        if isin_match:
-                            isin = isin_match.group(0)
+                    # Try to extract from the next line
+                    isin_parts = next_line.split("ISIN:")
+                    if len(isin_parts) > 1:
+                        fund_name = _clean_fund_name(isin_parts[0])
+                        logger.debug("Extracted fund_name from next line: %s", fund_name)
+
+                        isin = _extract_isin(isin_parts[1])
+                        if isin:
                             return fund_name, isin, start_idx + 1
-                    else:
-                        # Try to extract from the next line
-                        isin_parts = next_line.split("ISIN:")
-                        if len(isin_parts) > 1:
-                            potential_fund_name = isin_parts[0].strip()
-                            
-                            # Handle fund names with hyphens
-                            if "-" in potential_fund_name:
-                                # Take everything after the first hyphen
-                                fund_name = potential_fund_name.split("-", 1)[1].strip()
-                                # Trim any trailing hyphens and spaces
-                                fund_name = fund_name.rstrip("- ").strip()
-                            else:
-                                fund_name = potential_fund_name.strip()
-                            
-                            # Remove "Registrar : CAMS" if present
-                            if "Registrar : CAMS" in fund_name:
-                                fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                            
-                            print(f"Extracted fund_name from next line: {fund_name}")
-                            
-                            # Extract ISIN from next line
-                            isin_part = isin_parts[1].strip()
-                            isin_match = re.search(r'INF[A-Z0-9]{9}', isin_part)
-                            if isin_match:
-                                isin = isin_match.group(0)
-                                return fund_name, isin, start_idx + 1
-            
-            # Check if the next line contains a pattern that looks like the rest of an ISIN
-            # (9 alphanumeric characters, possibly followed by advisor info)
-            isin_rest_match = re.search(r'([A-Z0-9]{9})', next_line)
+
+            # Check if the next line contains the rest of a split ISIN
+            isin_rest_match = re.search(r"([A-Z0-9]{9})", next_line)
             if isin_rest_match and "INF" in current_line:
-                isin_rest = isin_rest_match.group(1)
-                isin = f"INF{isin_rest}"
-                print(f"Found split ISIN across lines: {isin}")
+                isin = f"INF{isin_rest_match.group(1)}"
+                logger.debug("Found split ISIN across lines: %s", isin)
                 return fund_name, isin, start_idx + 1
-        
-        # If still not found, try a more aggressive approach
-        # Look for any line containing INF followed by 9 alphanumeric characters
+
+        # Aggressive approach: look ahead up to 3 lines for any ISIN
         for i in range(start_idx, min(start_idx + 3, len(lines))):
             line = lines[i].strip()
             if "ISIN:" in line:
                 isin_parts = line.split("ISIN:")
                 if len(isin_parts) > 1:
-                    potential_fund_name = isin_parts[0].strip()
-                    
-                    # Handle fund names with hyphens
-                    if "-" in potential_fund_name:
-                        # Take everything after the first hyphen
-                        fund_name = potential_fund_name.split("-", 1)[1].strip()
-                        # Trim any trailing hyphens and spaces
-                        fund_name = fund_name.rstrip("- ").strip()
-                    else:
-                        fund_name = potential_fund_name.strip()
-                    
-                    # Remove "Registrar : CAMS" if present
-                    if "Registrar : CAMS" in fund_name:
-                        fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                    
-                    print(f"Extracted fund_name from aggressive search: {fund_name}")
-                    
-                    isin_match = re.search(r'INF[A-Z0-9]{9}', isin_parts[1])
-                    if isin_match:
-                        isin = isin_match.group(0)
+                    fund_name = _clean_fund_name(isin_parts[0])
+                    logger.debug("Extracted fund_name from aggressive search: %s", fund_name)
+
+                    isin = _extract_isin(isin_parts[1])
+                    if isin:
                         return fund_name, isin, i
-        
+
         return fund_name, isin, start_idx
 
     def write_to_csv(self, csv_file_name=None):
         if csv_file_name is None:
-            csv_file_name = f'CAMS_data_{datetime.now().strftime("%d_%m_%Y_%H_%M")}.csv'
-        # Get the fieldnames from the Item dataclass
-        fieldnames = [
-            field.name for field in _FundDetails.__dataclass_fields__.values()
-        ]
+            csv_file_name = f"CAMS_data_{datetime.now().strftime('%d_%m_%Y_%H_%M')}.csv"
+        fieldnames = [field.name for field in _FundDetails.__dataclass_fields__.values()]
 
-        # Write the list of dataclass objects to the CSV file
         with open(csv_file_name, mode="w", newline="") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-
-            # Write the header
             writer.writeheader()
-
-            # Write the data
             for item in self.alldata:
-                d = {}
-                for f in fieldnames:
-                    d[f] = getattr(item, f)
-                writer.writerow(d)
+                writer.writerow(asdict(item))
 
-        print(f'CSV file "{csv_file_name}" created successfully.')
+        logger.info('CSV file "%s" created successfully.', csv_file_name)
 
     def process(self):
         if not self.alllines:
@@ -414,247 +383,133 @@ class _ProcessTextFile:
         folio_num = ""
         fund_name = ""
         isin = ""
-        
-        # Debug: Print the first 20 lines to understand the format
-        print("First 20 lines of the PDF text:")
-        for i, line in enumerate(self.alllines[:20]):
-            print(f"Line {i}: {line.strip()}")
-        
+
+        logger.debug("First 20 lines of the PDF text:")
+        for idx, line in enumerate(self.alllines[:20]):
+            logger.debug("Line %d: %s", idx, line.strip())
+
         i = 0
         while i < len(self.alllines):
             eachline = self.alllines[i]
-            # Debug: Print each line being processed
-            # print(f"Processing line {i}: {eachline.strip()}")
-            
+
             m = re.match(FOLIO_PAN, eachline)
             if m:
-                folio_num = m.groupdict().get("folio_num")
-                print(f"Found folio_num: {folio_num}")
+                folio_num = m.groupdict().get("folio_num", "")
+                logger.debug("Found folio_num: %s", folio_num)
                 i += 1
                 continue
 
             # Try the regex pattern first
             m = re.match(FNAME_ISIN, eachline)
             if m:
-                fund_name = m.groupdict().get("fund_name")
-                isin = m.groupdict().get("isin")
-                
-                # Remove "Registrar : CAMS" if present
+                fund_name = m.groupdict().get("fund_name", "")
+                isin = m.groupdict().get("isin", "")
+
                 if "Registrar : CAMS" in fund_name:
                     fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                
-                print(f"Regex match - Found fund_name: {fund_name}")
-                print(f"Regex match - Found isin: {isin}")
+
+                logger.debug("Regex match - Found fund_name: %s", fund_name)
+                logger.debug("Regex match - Found isin: %s", isin)
                 i += 1
                 continue
-            
+
             # Try the multi-line extraction function
             if "ISIN:" in eachline or (i + 1 < len(self.alllines) and "ISIN:" in self.alllines[i + 1]):
-                print(f"Attempting multi-line extraction starting at line {i}")
+                logger.debug("Attempting multi-line extraction starting at line %d", i)
                 extracted_fund_name, extracted_isin, new_idx = self.extract_fund_and_isin(self.alllines, i)
                 if extracted_fund_name and extracted_isin:
                     fund_name = extracted_fund_name
                     isin = extracted_isin
-                    print(f"Multi-line extraction - Found fund_name: {fund_name}")
-                    print(f"Multi-line extraction - Found isin: {isin}")
+                    logger.debug("Multi-line extraction - Found fund_name: %s", fund_name)
+                    logger.debug("Multi-line extraction - Found isin: %s", isin)
                     i = new_idx + 1
                     continue
-            
+
             # Check for split ISIN codes (INF on one line, rest on next line)
             if "INF" in eachline and "ISIN:" in eachline and i + 1 < len(self.alllines):
                 next_line = self.alllines[i + 1].strip()
-                print(f"Checking for split ISIN - Current line: {eachline.strip()}")
-                print(f"Checking for split ISIN - Next line: {next_line}")
-                
-                # Look for a pattern that might be the rest of the ISIN (9 alphanumeric characters)
-                isin_rest_match = re.search(r'([A-Z0-9]{9})', next_line)
+                logger.debug("Checking for split ISIN - Current line: %s", eachline.strip())
+                logger.debug("Checking for split ISIN - Next line: %s", next_line)
+
+                isin_rest_match = re.search(r"([A-Z0-9]{9})", next_line)
                 if isin_rest_match:
-                    # Extract fund name - everything before "ISIN:"
                     isin_parts = eachline.split("ISIN:")
                     if len(isin_parts) > 1:
-                        potential_fund_name = isin_parts[0].strip()
-                        
-                        # Handle complex fund names with multiple hyphens
-                        if "-" in potential_fund_name:
-                            # Try to extract the most meaningful part of the fund name
-                            # First, try to get everything after the last hyphen
-                            fund_name = potential_fund_name.split("-")[-1].strip()
-                            
-                            # If the fund name is too short or doesn't look right, try a different approach
-                            if len(fund_name) < 5 or fund_name.startswith("("):
-                                # Try to get everything after the first hyphen
-                                parts = potential_fund_name.split("-", 1)
-                                if len(parts) > 1:
-                                    fund_name = parts[1].strip()
-                        else:
-                            fund_name = potential_fund_name
-                        
-                        # Remove "Registrar : CAMS" if present
-                        if "Registrar : CAMS" in fund_name:
-                            fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                        
-                        print(f"Extracted fund_name: {fund_name}")
-                    
-                    # Combine INF with the rest of the ISIN
-                    isin_rest = isin_rest_match.group(1)
-                    isin = f"INF{isin_rest}"
-                    print(f"Found split ISIN across lines: {isin}")
-                    print(f"Found fund_name: {fund_name}")
+                        fund_name = _clean_fund_name_smart(isin_parts[0])
+                        logger.debug("Extracted fund_name: %s", fund_name)
+
+                    isin = f"INF{isin_rest_match.group(1)}"
+                    logger.debug("Found split ISIN across lines: %s", isin)
+                    logger.debug("Found fund_name: %s", fund_name)
                     i += 1  # Skip the next line since we've processed it
                     continue
-            
+
             # Special case: Fund name on current line, ISIN on next line
             if i + 1 < len(self.alllines) and "ISIN:" in self.alllines[i + 1]:
                 current_line = eachline.strip()
                 next_line = self.alllines[i + 1].strip()
-                
-                # Check if the current line might contain a fund name
-                # Look for patterns like "PAMP-" or other fund name indicators
-                if ("PAMP-" in current_line or "-Growth" in current_line or "-Direct" in current_line or 
-                    "-Regular" in current_line or "-Plan" in current_line or "-Fund" in current_line or
-                    "-HDFC" in current_line or "-ICICI" in current_line or "-SBI" in current_line or
-                    "-Axis" in current_line or "-Kotak" in current_line or "-Nippon" in current_line or
-                    "-Tata" in current_line or "-UTI" in current_line or "-Aditya" in current_line or
-                    "-Mirae" in current_line or "-Parag" in current_line or "-Edelweiss" in current_line or
-                    "-DSP" in current_line or "-Invesco" in current_line or "-PGIM" in current_line or
-                    "-HSBC" in current_line or "-BNP" in current_line or "-Franklin" in current_line or
-                    "-IDFC" in current_line or "-Reliance" in current_line or "-L&T" in current_line or
-                    "-Mahindra" in current_line or "-Canara" in current_line or "-Indiabulls" in current_line or
-                    "-Motilal" in current_line or "-Quantum" in current_line or "-Sundaram" in current_line or
-                    "-Taurus" in current_line or "-JM" in current_line or "-Principal" in current_line or
-                    "-Baroda" in current_line or "-LIC" in current_line or "-BOI" in current_line or
-                    "-Union" in current_line or "-IDBI" in current_line or "-IIFL" in current_line or
-                    "-PPFAS" in current_line or "-WhiteOak" in current_line or "-Samco" in current_line or
-                    "-Groww" in current_line or "-KFintech" in current_line or "-CAMS" in current_line or
-                    "-Karvy" in current_line or "-NSDL" in current_line or "-CDSL" in current_line or
-                    "-SEBI" in current_line or "-AMFI" in current_line or "-RBI" in current_line or
-                    "-NSE" in current_line or "-BSE" in current_line or "-MCX" in current_line or
-                    "-NCDEX" in current_line or "-MCX-SX" in current_line or "-OTCEI" in current_line or
-                    "-ISE" in current_line or "-USE" in current_line or "-CSE" in current_line or
-                    "-DSE" in current_line or "-MSE" in current_line or "-VSE" in current_line or
-                    "-PSE" in current_line or "-ASE" in current_line or "-KSE" in current_line or
-                    "-TSE" in current_line or "-SSE" in current_line or "-HSE" in current_line or
-                    "-LSE" in current_line or "-NYSE" in current_line or "-NASDAQ" in current_line or
-                    "-LSE" in current_line or "-TSE" in current_line or "-HKSE" in current_line or
-                    "-SGX" in current_line or "-ASX" in current_line or "-TSX" in current_line or
-                    "-FSE" in current_line or "-XETRA" in current_line or "-Euronext" in current_line or
-                    "-LSE" in current_line or "-TSE" in current_line or "-HKSE" in current_line or
-                    "-SGX" in current_line or "-ASX" in current_line or "-TSX" in current_line or
-                    "-FSE" in current_line or "-XETRA" in current_line or "-Euronext" in current_line):
-                    # Extract fund name from the current line
-                    potential_fund_name = current_line.strip()
-                    
-                    # Handle fund names with hyphens
-                    if "-" in potential_fund_name:
-                        # Take everything after the first hyphen
-                        fund_name = potential_fund_name.split("-", 1)[1].strip()
-                        # Trim any trailing hyphens and spaces
-                        fund_name = fund_name.rstrip("- ").strip()
-                    else:
-                        fund_name = potential_fund_name.strip()
-                    
-                    # Remove "Registrar : CAMS" if present
-                    if "Registrar : CAMS" in fund_name:
-                        fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                    
-                    print(f"Special case - Extracted fund_name from current line: {fund_name}")
-                    
-                    # Extract ISIN from the next line
+
+                if _has_fund_name_pattern(current_line):
+                    fund_name = _clean_fund_name(current_line)
+                    logger.debug("Special case - Extracted fund_name from current line: %s", fund_name)
+
                     isin_part = next_line.replace("ISIN:", "").strip()
-                    isin_match = re.search(r'INF[A-Z0-9]{9}', isin_part)
-                    if isin_match:
-                        isin = isin_match.group(0)
-                        print(f"Special case - Found isin: {isin}")
+                    isin = _extract_isin(isin_part)
+                    if isin:
+                        logger.debug("Special case - Found isin: %s", isin)
                         i += 1  # Skip the next line since we've processed it
                         continue
-                
+
                 # Special case: Check if the next line starts with "(Non-Demat)" or similar
-                if next_line.startswith("(Non-Demat)") or next_line.startswith("(Demat)") or next_line.startswith("(Physical)"):
-                    # Extract fund name from the current line
-                    potential_fund_name = current_line.strip()
-                    
-                    # Handle fund names with hyphens
-                    if "-" in potential_fund_name:
-                        # Take everything after the first hyphen
-                        fund_name = potential_fund_name.split("-", 1)[1].strip()
-                        # Trim any trailing hyphens and spaces
-                        fund_name = fund_name.rstrip("- ").strip()
-                    else:
-                        fund_name = potential_fund_name.strip()
-                    
-                    # Remove "Registrar : CAMS" if present
-                    if "Registrar : CAMS" in fund_name:
-                        fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                    
-                    print(f"Special case (Non-Demat) - Extracted fund_name from current line: {fund_name}")
-                    
-                    # Extract ISIN from the next line
+                if (
+                    next_line.startswith("(Non-Demat)")
+                    or next_line.startswith("(Demat)")
+                    or next_line.startswith("(Physical)")
+                ):
+                    fund_name = _clean_fund_name(current_line)
+                    logger.debug("Special case (Non-Demat) - Extracted fund_name from current line: %s", fund_name)
+
                     isin_part = next_line.replace("ISIN:", "").strip()
-                    isin_match = re.search(r'INF[A-Z0-9]{9}', isin_part)
-                    if isin_match:
-                        isin = isin_match.group(0)
-                        print(f"Special case (Non-Demat) - Found isin: {isin}")
+                    isin = _extract_isin(isin_part)
+                    if isin:
+                        logger.debug("Special case (Non-Demat) - Found isin: %s", isin)
                         i += 1  # Skip the next line since we've processed it
                         continue
-            
+
             # Fallback: Look for lines containing "ISIN:" and extract manually
             if "ISIN:" in eachline:
-                print(f"Found line with ISIN: {eachline.strip()}")
-                
-                # Try to extract fund name - everything before "ISIN:"
+                logger.debug("Found line with ISIN: %s", eachline.strip())
+
                 isin_parts = eachline.split("ISIN:")
                 if len(isin_parts) > 1:
-                    # Extract fund name - take everything after the last hyphen if it exists
-                    potential_fund_name = isin_parts[0].strip()
-                    if "-" in potential_fund_name:
-                        fund_name = potential_fund_name.split("-")[-1].strip()
-                    else:
-                        fund_name = potential_fund_name
-                    
-                    # Remove "Registrar : CAMS" if present
-                    if "Registrar : CAMS" in fund_name:
-                        fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-                    
-                    # Extract ISIN - look for INF followed by 9 alphanumeric characters
+                    fund_name = _clean_fund_name_smart(isin_parts[0])
+
                     isin_part = isin_parts[1].strip()
-                    isin_match = re.search(r'INF[A-Z0-9]{9}', isin_part)
-                    if isin_match:
-                        isin = isin_match.group(0)
-                    else:
-                        # Check if the line ends with "INF" or contains "INF" followed by something else
-                        if isin_part.endswith("INF") or "INF" in isin_part:
-                            # The ISIN might be split across lines
-                            # Check the next line for the rest of the ISIN
-                            if i + 1 < len(self.alllines):
-                                next_line = self.alllines[i + 1].strip()
-                                print(f"Found 'INF' in current line, checking next line: {next_line}")
-                                
-                                # Look for a pattern that might be the rest of the ISIN (9 alphanumeric characters)
-                                isin_rest_match = re.search(r'([A-Z0-9]{9})', next_line)
-                                if isin_rest_match:
-                                    isin_rest = isin_rest_match.group(1)
-                                    isin = f"INF{isin_rest}"
-                                    print(f"Found split ISIN: {isin}")
-                                    i += 1  # Skip the next line since we've processed it
-                    
-                    print(f"Manual extraction - Found fund_name: {fund_name}")
-                    print(f"Manual extraction - Found isin: {isin}")
+                    isin = _extract_isin(isin_part)
+                    if not isin and (isin_part.endswith("INF") or "INF" in isin_part) and i + 1 < len(self.alllines):
+                        next_line = self.alllines[i + 1].strip()
+                        logger.debug("Found 'INF' in current line, checking next line: %s", next_line)
+
+                        isin_rest_match = re.search(r"([A-Z0-9]{9})", next_line)
+                        if isin_rest_match:
+                            isin = f"INF{isin_rest_match.group(1)}"
+                            logger.debug("Found split ISIN: %s", isin)
+                            i += 1  # Skip the next line since we've processed it
+
+                    logger.debug("Manual extraction - Found fund_name: %s", fund_name)
+                    logger.debug("Manual extraction - Found isin: %s", isin)
                 i += 1
                 continue
-                
+
             # Process transaction lines
             m = re.match(REGULAR_BUY_TXN, eachline)
             if m:
-                date = m.groupdict().get("date")
+                date = m.groupdict().get("date", "")
                 txn = "Buy"
-                amount = m.groupdict().get("amount")
-                units = m.groupdict().get("units")
-                nav = m.groupdict().get("nav")
-                balance_units = m.groupdict().get("unitbalance")
-
-                # date_format = "%d-%b-%Y"  # Specify the format of the input date string
-                # # Convert the string to a datetime object
-                # date_obj = datetime.strptime(date, date_format)
+                amount = float(m.groupdict().get("amount", 0))
+                units = float(m.groupdict().get("units", 0))
+                nav = float(m.groupdict().get("nav", 0))
+                balance_units = float(m.groupdict().get("unitbalance", 0))
 
                 t = _FundDetails(
                     folio_num=folio_num,
@@ -665,8 +520,8 @@ class _ProcessTextFile:
                     txn=txn,
                     amount=amount,
                     units=units,
-                    nav=float(nav),
-                    balance_units=float(balance_units),
+                    nav=nav,
+                    balance_units=balance_units,
                 )
                 self.alldata.append(t)
                 i += 1
@@ -674,46 +529,15 @@ class _ProcessTextFile:
 
             m = re.match(REGULAR_SELL_TXN, eachline)
             if m:
-                date = m.groupdict().get("date")
+                date = m.groupdict().get("date", "")
                 txn = "Sell"
-                amount = m.groupdict().get("amount")
-                amtstring = re.sub(r"\(|\)", "", amount)
-                units = m.groupdict().get("units")
-                unitstring = re.sub(r"\(|\)", "", units)
-                nav = m.groupdict().get("nav")
-                balance_units = m.groupdict().get("unitbalance")
+                amount_str = m.groupdict().get("amount", "0")
+                amount = float(re.sub(r"\(|\)", "", amount_str))
+                units_str = m.groupdict().get("units", "0")
+                units = float(re.sub(r"\(|\)", "", units_str))
+                nav = float(m.groupdict().get("nav", 0))
+                balance_units = float(m.groupdict().get("unitbalance", 0))
 
-                # date_format = "%d-%b-%Y"  # Specify the format of the input date string
-                # # Convert the string to a datetime object
-                # date_obj = datetime.strptime(date, date_format)
-                t = _FundDetails(
-                    folio_num=folio_num,
-                    fund_name=fund_name,
-                    isin=isin,
-                    scheme_code=self.lnav.get_sch_code(isin),
-                    date=date,
-                    txn=txn,
-                    amount=float(amtstring),
-                    units=float(unitstring),
-                    nav=float(nav),
-                    balance_units=float(balance_units),
-                )
-                self.alldata.append(t)
-                i += 1
-                continue
-
-            m = re.match(SEGR_BUY_TXN, eachline)
-            if m:
-                date = m.groupdict().get("date")
-                txn = "Buy"
-                amount = "0"
-                units = m.groupdict().get("units")
-                nav = "0"
-                balance_units = m.groupdict().get("unitbalance")
-
-                # date_format = "%d-%b-%Y"  # Specify the format of the input date string
-                # # Convert the string to a datetime object
-                # date_obj = datetime.strptime(date, date_format)
                 t = _FundDetails(
                     folio_num=folio_num,
                     fund_name=fund_name,
@@ -723,135 +547,78 @@ class _ProcessTextFile:
                     txn=txn,
                     amount=amount,
                     units=units,
-                    nav=float(nav),
-                    balance_units=float(balance_units),
+                    nav=nav,
+                    balance_units=balance_units,
                 )
                 self.alldata.append(t)
                 i += 1
                 continue
-                
+
+            m = re.match(SEGR_BUY_TXN, eachline)
+            if m:
+                date = m.groupdict().get("date", "")
+                txn = "Buy"
+                amount = 0.0
+                units = float(m.groupdict().get("units", 0))
+                nav = 0.0
+                balance_units = float(m.groupdict().get("unitbalance", 0))
+
+                t = _FundDetails(
+                    folio_num=folio_num,
+                    fund_name=fund_name,
+                    isin=isin,
+                    scheme_code=self.lnav.get_sch_code(isin),
+                    date=date,
+                    txn=txn,
+                    amount=amount,
+                    units=units,
+                    nav=nav,
+                    balance_units=balance_units,
+                )
+                self.alldata.append(t)
+                i += 1
+                continue
+
             # If we get here, we didn't match any pattern
             i += 1
 
 
 class ProcessPDF:
-    def __init__(self, filename, password) -> None:
+    def __init__(self, filename, password=None) -> None:
+        if not filename:
+            raise ValueError("filename cannot be empty")
+        if not os.path.isfile(filename):
+            raise FileNotFoundError(f"PDF file not found: {filename}")
         self.filename = filename
         self.password = password
-        self.alldata = []
+        self.alldata: list[_FundDetails] = []
 
     def get_pdf_data(self, output_format="csv"):
+        format_specifiers = ["dicts", "csv", "json", "df"]
+        if output_format not in format_specifiers:
+            raise ValueError(f"Output format must be one of {', '.join(format_specifiers)}")
+
         file_path = self.filename
         doc_pwd = self.password
         final_text = ""
-        print("Processing PDF. Please wait...")
-        try:
-            with pdfplumber.open(file_path, password=doc_pwd) as pdf:
-                for i in range(len(pdf.pages)):
-                    txt = pdf.pages[i].extract_text()
+        logger.info("Processing PDF. Please wait...")
+        with pdfplumber.open(file_path, password=doc_pwd) as pdf:
+            for page in pdf.pages:
+                txt = page.extract_text()
+                if txt:
                     final_text = final_text + "\n" + txt
-                pdf.close()
-            # Replace all occurrences of ',' with an empty string
-            final_text = final_text.replace(",", "")
-            # print("Text found, writing to file")
-            # with open("text.txt", "w+") as f:
-            #     f.write(final_text)
-            # self.extract_text(final_text)
-            format_specifiers = ["dicts", "csv", "json", "df"]
-            if output_format not in format_specifiers:
-                raise Exception(
-                    f"Error!! Output format can be one of {','.join(format_specifiers)}"
-                )
-            pt = _ProcessTextFile(alllines=final_text.splitlines())
 
-            if output_format == "csv":
-                pt.write_to_csv()
-            else:
-                item_dicts = [asdict(item) for item in pt.alldata]
-                if output_format == "df":
-                    # Convert the list of dictionaries to a DataFrame
-                    df = pd.DataFrame(item_dicts)
-                    return df
-                elif output_format == "json":
-                    json_string = json.dumps(item_dicts)
-                    return json_string
-                else:
-                    return item_dicts
-        except Exception as ex:
-            print(ex)
-            traceback.print_exc()
+        # Replace all occurrences of ',' with an empty string
+        final_text = final_text.replace(",", "")
+        pt = _ProcessTextFile(alllines=final_text.splitlines())
 
-    def process(self, pdf_text):
-        """Process the PDF text and extract transaction data"""
-        lines = pdf_text.split('\n')
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            
-            # Debug print for the first 20 lines
-            if i < 20:
-                print(f"Line {i}: {line}")
-            
-            # Try to match FOLIO_PAN pattern
-            folio_match = re.match(FOLIO_PAN, line)
-            if folio_match:
-                self.folio = folio_match.group('folio_num')
-                self.pan = folio_match.group('pan')
-                print(f"Found folio: {self.folio}, pan: {self.pan}")
-                i += 1
-                continue
-            
-            # Try to match FNAME_ISIN pattern
-            fname_match = re.match(FNAME_ISIN, line)
-            if fname_match:
-                self.fund_name = fname_match.group('fund_name')
-                self.isin = fname_match.group('isin')
-                print(f"Found fund_name: {self.fund_name}, isin: {self.isin}")
-                i += 1
-                continue
-            
-            # If regex fails, try manual extraction
-            if "ISIN:" in line:
-                parts = line.split("ISIN:")
-                if len(parts) > 1:
-                    # Extract fund name - take everything after the last hyphen if it exists
-                    potential_fund_name = parts[0].strip()
-                    
-                    # Handle complex fund names with multiple hyphens
-                    if "-" in potential_fund_name:
-                        # Try to extract the most meaningful part of the fund name
-                        # First, try to get everything after the last hyphen
-                        self.fund_name = potential_fund_name.split("-")[-1].strip()
-                        
-                        # If the fund name is too short or doesn't look right, try a different approach
-                        if len(self.fund_name) < 5 or self.fund_name.startswith("("):
-                            # Try to get everything after the first hyphen
-                            parts = potential_fund_name.split("-", 1)
-                            if len(parts) > 1:
-                                self.fund_name = parts[1].strip()
-                    else:
-                        self.fund_name = potential_fund_name
-                    
-                    print(f"Extracted fund_name: {self.fund_name}")
-                    
-                    # Check for ISIN in the same line or next line
-                    isin_part = parts[1].strip()
-                    isin_match = re.search(r'INF[A-Z0-9]{9}', isin_part)
-                    if isin_match:
-                        self.isin = isin_match.group(0)
-                    elif isin_part.endswith("INF") or "INF" in isin_part:
-                        # Check next line for ISIN remainder
-                        if i + 1 < len(lines):
-                            next_line = lines[i + 1].strip()
-                            isin_rest_match = re.search(r'([A-Z0-9]{9})', next_line)
-                            if isin_rest_match:
-                                self.isin = f"INF{isin_rest_match.group(1)}"
-                                i += 1  # Skip the next line since we've processed it
-                    
-                    print(f"Found fund_name: {self.fund_name}, isin: {self.isin}")
-                    i += 1
-                    continue
-            
-            # Process transaction lines
-            # ... rest of the transaction processing code ...
-            i += 1
+        if output_format == "csv":
+            pt.write_to_csv()
+            return None
+        item_dicts = [asdict(item) for item in pt.alldata]
+        if output_format == "df":
+            return pd.DataFrame(item_dicts)
+        elif output_format == "json":
+            return json.dumps(item_dicts)
+        else:
+            return item_dicts

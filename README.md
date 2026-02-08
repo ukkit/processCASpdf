@@ -13,10 +13,11 @@ A Python tool/library that extracts data from CAMS Mutual Fund PDF statements (I
 ## Installation
 
 1. Clone this repository or download the files
-2. Install the required dependencies:
+2. Install [uv](https://docs.astral.sh/uv/) if you haven't already
+3. Install the required dependencies:
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 ## Usage
