@@ -8,7 +8,7 @@ A Python tool/library that extracts data from CAMS Mutual Fund PDF statements (I
 - Supports password-protected PDFs
 - Outputs data in multiple formats: CSV, DataFrame, JSON, or list of dictionaries
 - Automatically fetches latest NAV data from AMFI India portal
-- Handles various fund name formats and ISIN codes
+- Handles various fund name formats and ISIN codes, including multi-line cases
 
 ## Installation
 
@@ -25,43 +25,97 @@ uv sync
 ### Basic Usage
 
 ```python
-from app.processCASpdf import ProcessPDF
+from processCASpdf import ProcessPDF
 
-# Initialize with PDF file path and password (if required)
-filename = "path/to/your/statement.pdf"
-password = "your_password"  # Use None if PDF is not password-protected
-
-# Create a ProcessPDF instance
-pp = ProcessPDF(filename, password)
-
-# Get data in your preferred format
-# Available formats: "csv", "df", "json", "dicts"
-output = pp.get_pdf_data(output_format="df")
-
-# If output_format is "csv", a CSV file will be created with the current timestamp
-# If output_format is "df", a pandas DataFrame will be returned
-# If output_format is "json", a JSON string will be returned
-# If output_format is "dicts", a list of dictionaries will be returned
+# Create a processor instance
+pdf = ProcessPDF("path/to/your/CAS_statement.pdf", password="your_pdf_password")
 ```
 
-### Example Output
+- `filename` (required) - Path to the CAMS CAS PDF file.
+- `password` (optional) - PDF password, if the file is password-protected.
 
-When using `output_format="df"`, the output will be a pandas DataFrame with the following columns:
+### Output Formats
 
-- `fund_name`: Name of the mutual fund
-- `isin`: ISIN code of the fund
-- `scheme_code`: Scheme code from AMFI
-- `folio_num`: Folio number
-- `date`: Transaction date
-- `txn`: Transaction type (Buy/Sell)
-- `amount`: Transaction amount
-- `units`: Number of units
-- `nav`: Net Asset Value
-- `balance_units`: Balance units after transaction
+Call `get_pdf_data()` with one of four format options:
 
-## Requirements
+#### CSV (default)
 
-See `requirements.txt` for a list of required Python packages.
+Writes a CSV file to the current directory named `CAMS_data_<timestamp>.csv`.
+
+```python
+pdf.get_pdf_data("csv")
+```
+
+#### DataFrame
+
+Returns a pandas `DataFrame`.
+
+```python
+df = pdf.get_pdf_data("df")
+print(df.head())
+```
+
+#### JSON
+
+Returns a JSON string.
+
+```python
+json_str = pdf.get_pdf_data("json")
+```
+
+#### List of Dicts
+
+Returns a list of Python dictionaries.
+
+```python
+records = pdf.get_pdf_data("dicts")
+for record in records:
+    print(record)
+```
+
+### Output Fields
+
+Each record contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `fund_name` | str | Mutual fund scheme name |
+| `isin` | str | ISIN code (e.g. `INF...`) |
+| `scheme_code` | str | AMFI scheme code (fetched live) |
+| `folio_num` | str | Folio number |
+| `date` | str | Transaction date (e.g. `01-Jan-2025`) |
+| `txn` | str | Transaction type (`Buy` or `Sell`) |
+| `amount` | float | Transaction amount |
+| `units` | float | Number of units transacted |
+| `nav` | float | NAV at time of transaction |
+| `balance_units` | float | Unit balance after transaction |
+
+### Full Example
+
+```python
+import logging
+from processCASpdf import ProcessPDF
+
+# Enable debug logging (optional)
+logging.basicConfig(level=logging.DEBUG)
+
+# Process the PDF and get a DataFrame
+pdf = ProcessPDF("MyCAS.pdf", password="mypassword")
+df = pdf.get_pdf_data("df")
+
+# Filter by fund
+hdfc_txns = df[df["fund_name"].str.contains("HDFC", case=False)]
+print(hdfc_txns)
+
+# Export to Excel
+df.to_excel("cas_transactions.xlsx", index=False)
+```
+
+## Notes
+
+- The script fetches the latest NAV data from AMFI on each run to resolve scheme codes. An internet connection is required.
+- Commas in the PDF text are stripped automatically before parsing.
+- The parser handles fund names and ISIN codes that span multiple lines in the PDF.
 
 ## License
 
@@ -69,4 +123,4 @@ This software is provided under the BSD license. See the copyright notice in the
 
 ## Credits
 
-This script is an extension of the `camspdf.py` script originally written by Suhas Bharadwaj. 
+This script is an extension of the `camspdf.py` script originally written by Suhas Bharadwaj.
