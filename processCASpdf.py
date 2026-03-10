@@ -5,7 +5,7 @@
 #
 # I have modified the script to extract fund name and isin from CAS statements that are on multiple lines
 #
-# Version: 1.0.0
+# Version: 0.3.0
 # Date: 2025-04-05
 # Copyright (c) 2025, Neeraj <@ukkit>
 # All rights reserved.
@@ -53,7 +53,6 @@ REGULAR_BUY_TXN = r"(?P<date>\d+\-\S+\-\d+)\s+(?P<txn>.*)\s+(?P<amount>[0-9]+\.[
 REGULAR_SELL_TXN = r"(?P<date>\d+\-\S+\-\d+)\s+(?P<txn>.*)\s+(?P<amount>\([0-9]+\.[0-9]*\))\s+(?P<units>\([0-9]+\.[0-9]*\))\s+(?P<nav>[0-9]+\.[0-9]*)\s+(?P<unitbalance>[0-9]+\.[0-9]*).*"
 SEGR_BUY_TXN = r"(?P<date>\d+\-\S+\-\d+)\s+(?P<txn>.*)\s+(?P<units>[0-9]+\.[0-9]*)\s+(?P<unitbalance>[0-9]+\.[0-9]*).*"
 FOLIO_PAN = r"^Folio No:\s+(?P<folio_num>.*)\s+PAN:\s+(?P<pan>[A-Z,0-9]{10})"
-FNAME_ISIN = r"^(?P<fund_name>.*?)(?:\s*-\s*|\s+)ISIN:\s*(?P<isin>INF[A-Z0-9]{9}).*"
 
 # Fund name indicator patterns used to identify lines containing mutual fund names
 _FUND_NAME_PATTERNS = (
@@ -103,43 +102,16 @@ _FUND_NAME_PATTERNS = (
     "-WhiteOak",
     "-Samco",
     "-Groww",
-    "-KFintech",
-    "-CAMS",
-    "-Karvy",
-    "-NSDL",
-    "-CDSL",
-    "-SEBI",
-    "-AMFI",
-    "-RBI",
-    "-NSE",
-    "-BSE",
-    "-MCX",
-    "-NCDEX",
-    "-MCX-SX",
-    "-OTCEI",
-    "-ISE",
-    "-USE",
-    "-CSE",
-    "-DSE",
-    "-MSE",
-    "-VSE",
-    "-PSE",
-    "-ASE",
-    "-KSE",
-    "-TSE",
-    "-SSE",
-    "-HSE",
-    "-LSE",
-    "-NYSE",
-    "-NASDAQ",
-    "-HKSE",
-    "-SGX",
-    "-ASX",
-    "-TSX",
-    "-FSE",
-    "-XETRA",
-    "-Euronext",
 )
+
+
+_REGISTRAR_SUFFIXES = ("Registrar : CAMS", "Registrar : KFintech", "Registrar : Karvy")
+
+
+def _strip_registrar(name: str) -> str:
+    for suffix in _REGISTRAR_SUFFIXES:
+        name = name.replace(suffix, "")
+    return name.strip()
 
 
 def _has_fund_name_pattern(line):
@@ -151,15 +123,13 @@ def _clean_fund_name(raw_name):
     """Extract and clean fund name from raw text.
 
     Splits on the first hyphen and takes the right side,
-    strips trailing hyphens/spaces, and removes "Registrar : CAMS".
+    strips trailing hyphens/spaces, and removes registrar suffixes.
     """
     name = raw_name.strip()
     if "-" in name:
         name = name.split("-", 1)[1].strip()
         name = name.rstrip("- ").strip()
-    if "Registrar : CAMS" in name:
-        name = name.replace("Registrar : CAMS", "").strip()
-    return name
+    return _strip_registrar(name)
 
 
 def _clean_fund_name_smart(raw_name):
@@ -176,9 +146,7 @@ def _clean_fund_name_smart(raw_name):
             name = parts[1].strip() if len(parts) > 1 else last_part
         else:
             name = last_part
-    if "Registrar : CAMS" in name:
-        name = name.replace("Registrar : CAMS", "").strip()
-    return name
+    return _strip_registrar(name)
 
 
 def _extract_isin(text):
@@ -245,17 +213,10 @@ class _FundDetails:
 
 
 class _ProcessTextFile:
-    def __init__(
-        self,
-        alllines="text.txt",
-    ) -> None:
+    def __init__(self, alllines: list[str]) -> None:
         self.alldata: list[_FundDetails] = []
         self.lnav = _LatestNav()
-        if alllines == "text.txt":
-            with open(alllines) as f:
-                self.alllines = f.readlines()
-        else:
-            self.alllines = alllines
+        self.alllines = alllines
         self.process()
 
     def extract_fund_and_isin(self, lines, start_idx):
@@ -366,7 +327,7 @@ class _ProcessTextFile:
 
     def write_to_csv(self, csv_file_name=None):
         if csv_file_name is None:
-            csv_file_name = f"CAMS_data_{datetime.now().strftime('%d_%m_%Y_%H_%M')}.csv"
+            csv_file_name = f"CAS_data_{datetime.now().strftime('%d_%m_%Y_%H_%M')}.csv"
         fieldnames = [field.name for field in _FundDetails.__dataclass_fields__.values()]
 
         with open(csv_file_name, mode="w", newline="") as csv_file:
@@ -399,107 +360,16 @@ class _ProcessTextFile:
                 i += 1
                 continue
 
-            # Try the regex pattern first
-            m = re.match(FNAME_ISIN, eachline)
-            if m:
-                fund_name = m.groupdict().get("fund_name", "")
-                isin = m.groupdict().get("isin", "")
-
-                if "Registrar : CAMS" in fund_name:
-                    fund_name = fund_name.replace("Registrar : CAMS", "").strip()
-
-                logger.debug("Regex match - Found fund_name: %s", fund_name)
-                logger.debug("Regex match - Found isin: %s", isin)
-                i += 1
-                continue
-
-            # Try the multi-line extraction function
             if "ISIN:" in eachline or (i + 1 < len(self.alllines) and "ISIN:" in self.alllines[i + 1]):
-                logger.debug("Attempting multi-line extraction starting at line %d", i)
+                logger.debug("Attempting fund/ISIN extraction starting at line %d", i)
                 extracted_fund_name, extracted_isin, new_idx = self.extract_fund_and_isin(self.alllines, i)
                 if extracted_fund_name and extracted_isin:
                     fund_name = extracted_fund_name
                     isin = extracted_isin
-                    logger.debug("Multi-line extraction - Found fund_name: %s", fund_name)
-                    logger.debug("Multi-line extraction - Found isin: %s", isin)
+                    logger.debug("Found fund_name: %s", fund_name)
+                    logger.debug("Found isin: %s", isin)
                     i = new_idx + 1
                     continue
-
-            # Check for split ISIN codes (INF on one line, rest on next line)
-            if "INF" in eachline and "ISIN:" in eachline and i + 1 < len(self.alllines):
-                next_line = self.alllines[i + 1].strip()
-                logger.debug("Checking for split ISIN - Current line: %s", eachline.strip())
-                logger.debug("Checking for split ISIN - Next line: %s", next_line)
-
-                isin_rest_match = re.search(r"([A-Z0-9]{9})", next_line)
-                if isin_rest_match:
-                    isin_parts = eachline.split("ISIN:")
-                    if len(isin_parts) > 1:
-                        fund_name = _clean_fund_name_smart(isin_parts[0])
-                        logger.debug("Extracted fund_name: %s", fund_name)
-
-                    isin = f"INF{isin_rest_match.group(1)}"
-                    logger.debug("Found split ISIN across lines: %s", isin)
-                    logger.debug("Found fund_name: %s", fund_name)
-                    i += 1  # Skip the next line since we've processed it
-                    continue
-
-            # Special case: Fund name on current line, ISIN on next line
-            if i + 1 < len(self.alllines) and "ISIN:" in self.alllines[i + 1]:
-                current_line = eachline.strip()
-                next_line = self.alllines[i + 1].strip()
-
-                if _has_fund_name_pattern(current_line):
-                    fund_name = _clean_fund_name(current_line)
-                    logger.debug("Special case - Extracted fund_name from current line: %s", fund_name)
-
-                    isin_part = next_line.replace("ISIN:", "").strip()
-                    isin = _extract_isin(isin_part)
-                    if isin:
-                        logger.debug("Special case - Found isin: %s", isin)
-                        i += 1  # Skip the next line since we've processed it
-                        continue
-
-                # Special case: Check if the next line starts with "(Non-Demat)" or similar
-                if (
-                    next_line.startswith("(Non-Demat)")
-                    or next_line.startswith("(Demat)")
-                    or next_line.startswith("(Physical)")
-                ):
-                    fund_name = _clean_fund_name(current_line)
-                    logger.debug("Special case (Non-Demat) - Extracted fund_name from current line: %s", fund_name)
-
-                    isin_part = next_line.replace("ISIN:", "").strip()
-                    isin = _extract_isin(isin_part)
-                    if isin:
-                        logger.debug("Special case (Non-Demat) - Found isin: %s", isin)
-                        i += 1  # Skip the next line since we've processed it
-                        continue
-
-            # Fallback: Look for lines containing "ISIN:" and extract manually
-            if "ISIN:" in eachline:
-                logger.debug("Found line with ISIN: %s", eachline.strip())
-
-                isin_parts = eachline.split("ISIN:")
-                if len(isin_parts) > 1:
-                    fund_name = _clean_fund_name_smart(isin_parts[0])
-
-                    isin_part = isin_parts[1].strip()
-                    isin = _extract_isin(isin_part)
-                    if not isin and (isin_part.endswith("INF") or "INF" in isin_part) and i + 1 < len(self.alllines):
-                        next_line = self.alllines[i + 1].strip()
-                        logger.debug("Found 'INF' in current line, checking next line: %s", next_line)
-
-                        isin_rest_match = re.search(r"([A-Z0-9]{9})", next_line)
-                        if isin_rest_match:
-                            isin = f"INF{isin_rest_match.group(1)}"
-                            logger.debug("Found split ISIN: %s", isin)
-                            i += 1  # Skip the next line since we've processed it
-
-                    logger.debug("Manual extraction - Found fund_name: %s", fund_name)
-                    logger.debug("Manual extraction - Found isin: %s", isin)
-                i += 1
-                continue
 
             # Process transaction lines
             m = re.match(REGULAR_BUY_TXN, eachline)

@@ -1,6 +1,6 @@
 [project]
 name = "processCASpdf"
-version = "0.2.1"
+version = "0.3.0"
 description = "Extract data from CAMS Mutual Fund PDF statements"
 requires-python = ">=3.9"
 dependencies = [

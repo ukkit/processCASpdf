@@ -1,126 +1,93 @@
-# CAMS Mutual Fund PDF Statement Parser
+# Mutual Fund CAS    PDF Statement Parser
 
-A Python tool/library that extracts data from CAMS Mutual Fund PDF statements (India) into various formats including CSV, DataFrame, JSON, or a list of dictionaries.
+A Python tool/library that extracts data from Consolidated Account Statement (CAS) PDFs (India) — tested with CAMS and KFintech — into CSV, DataFrame, JSON, or a list of dictionaries.
 
-## Features
+## Requirements
 
-- Extracts fund details, transaction history, and other relevant information from CAMS Mutual Fund PDF statements
-- Supports password-protected PDFs
-- Outputs data in multiple formats: CSV, DataFrame, JSON, or list of dictionaries
-- Automatically fetches latest NAV data from AMFI India portal
-- Handles various fund name formats and ISIN codes, including multi-line cases
+- Python >= 3.9
+- [uv](https://github.com/astral-sh/uv) package manager
+- Internet connection (fetches AMFI scheme data on each run)
 
 ## Installation
 
-1. Clone this repository or download the files
-2. Install [uv](https://docs.astral.sh/uv/) if you haven't already
-3. Install the required dependencies:
-
 ```bash
+git clone https://github.com/your-username/processCASpdf.git
+cd processCASpdf
+curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
 ## Usage
 
-### Basic Usage
-
 ```python
 from processCASpdf import ProcessPDF
 
-# Create a processor instance
-pdf = ProcessPDF("path/to/your/CAS_statement.pdf", password="your_pdf_password")
+pdf = ProcessPDF("CAS_statement.pdf", password="your_pdf_password")
 ```
 
-- `filename` (required) - Path to the CAMS CAS PDF file.
-- `password` (optional) - PDF password, if the file is password-protected.
+- `filename` (required) - Path to the CAS PDF file.
+- `password` (optional) - PDF password (usually your PAN in uppercase).
 
 ### Output Formats
 
-Call `get_pdf_data()` with one of four format options:
-
-#### CSV (default)
-
-Writes a CSV file to the current directory named `CAMS_data_<timestamp>.csv`.
+Call `get_pdf_data(format)` with one of: `"csv"` (default), `"df"`, `"json"`, `"dicts"`.
 
 ```python
-pdf.get_pdf_data("csv")
-```
-
-#### DataFrame
-
-Returns a pandas `DataFrame`.
-
-```python
-df = pdf.get_pdf_data("df")
-print(df.head())
-```
-
-#### JSON
-
-Returns a JSON string.
-
-```python
-json_str = pdf.get_pdf_data("json")
-```
-
-#### List of Dicts
-
-Returns a list of Python dictionaries.
-
-```python
-records = pdf.get_pdf_data("dicts")
-for record in records:
-    print(record)
+pdf.get_pdf_data("csv")          # writes CAS_data_<timestamp>.csv to current directory
+df  = pdf.get_pdf_data("df")     # returns pandas DataFrame
+js  = pdf.get_pdf_data("json")   # returns JSON string
+rec = pdf.get_pdf_data("dicts")  # returns list of dicts
 ```
 
 ### Output Fields
-
-Each record contains:
 
 | Field | Type | Description |
 |---|---|---|
 | `fund_name` | str | Mutual fund scheme name |
 | `isin` | str | ISIN code (e.g. `INF...`) |
-| `scheme_code` | str | AMFI scheme code (fetched live) |
+| `scheme_code` | str | AMFI scheme code; empty if lookup fails |
 | `folio_num` | str | Folio number |
 | `date` | str | Transaction date (e.g. `01-Jan-2025`) |
-| `txn` | str | Transaction type (`Buy` or `Sell`) |
-| `amount` | float | Transaction amount |
-| `units` | float | Number of units transacted |
+| `txn` | str | `Buy` or `Sell` |
+| `amount` | float | Transaction amount (INR) |
+| `units` | float | Units transacted |
 | `nav` | float | NAV at time of transaction |
 | `balance_units` | float | Unit balance after transaction |
 
-### Full Example
+### Example
 
 ```python
 import logging
 from processCASpdf import ProcessPDF
 
-# Enable debug logging (optional)
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)  # optional
 
-# Process the PDF and get a DataFrame
-pdf = ProcessPDF("MyCAS.pdf", password="mypassword")
+pdf = ProcessPDF("MyCAS.pdf", password="ABCDE1234F")
 df = pdf.get_pdf_data("df")
 
-# Filter by fund
-hdfc_txns = df[df["fund_name"].str.contains("HDFC", case=False)]
-print(hdfc_txns)
-
-# Export to Excel
+df[df["fund_name"].str.contains("HDFC", case=False)]
 df.to_excel("cas_transactions.xlsx", index=False)
 ```
 
-## Notes
+## Troubleshooting
 
-- The script fetches the latest NAV data from AMFI on each run to resolve scheme codes. An internet connection is required.
-- Commas in the PDF text are stripped automatically before parsing.
-- The parser handles fund names and ISIN codes that span multiple lines in the PDF.
+| Problem | Likely cause / fix |
+|---|---|
+| `PDFPasswordIncorrect` | Wrong or missing password. Try your PAN in uppercase. |
+| No transactions extracted | Enable debug logging to inspect raw PDF text. |
+| `scheme_code` is empty | ISIN not found in current AMFI data (new or discontinued scheme). |
+| Network error on startup | AMFI data fetch requires outbound HTTPS. |
 
-## License
+## Development
 
-This software is provided under the BSD license. See the copyright notice in the source code for details.
+```bash
+uv sync --group dev
+uv run ruff check .
+uv run ruff format .
+uv run mypy processCASpdf.py
+uv run pre-commit install
+```
 
 ## Credits
 
-This script is an extension of the `camspdf.py` script originally written by Suhas Bharadwaj.
+Based on `camspdf.py` originally written by Suhas Bharadwaj.
