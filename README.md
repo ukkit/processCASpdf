@@ -1,6 +1,6 @@
-# Mutual Fund CAS    PDF Statement Parser
+# Mutual Fund CAS PDF Statement Parser
 
-A Python tool/library that extracts data from Consolidated Account Statement (CAS) PDFs (India) — tested with CAMS and KFintech — into CSV, DataFrame, JSON, or a list of dictionaries.
+A Python tool/library that extracts data from Consolidated Account Statement (CAS) PDFs (https://github.com/ukkit/processCASpdf) — tested with KFintech — into CSV, DataFrame, JSON, or a list of dictionaries.
 
 ## Requirements
 
@@ -11,7 +11,7 @@ A Python tool/library that extracts data from Consolidated Account Statement (CA
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/processCASpdf.git
+git clone https://github.com/ukkit/processCASpdf.git
 cd processCASpdf
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
@@ -90,4 +90,4 @@ uv run pre-commit install
 
 ## Credits
 
-Based on `camspdf.py` originally written by Suhas Bharadwaj.
+Based on [`camspdf.py`](https://github.com/srbharadwaj/CAMSPdfExtractor) originally written by Suhas Bharadwaj.

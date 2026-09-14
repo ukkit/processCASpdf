@@ -2,12 +2,31 @@
 name = "processCASpdf"
 version = "0.3.0"
 description = "Extract data from CAMS Mutual Fund PDF statements"
+readme = "README.md"
 requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "Neeraj Tikku", email = "neeraj.tikku@gmail.com" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "pdfplumber>=0.7.0",
     "pandas>=1.3.0",
     "requests>=2.25.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ukkit/processCASpdf"
+Repository = "https://github.com/ukkit/processCASpdf"
+Issues = "https://github.com/ukkit/processCASpdf/issues"
 
 [build-system]
 requires = ["hatchling"]
