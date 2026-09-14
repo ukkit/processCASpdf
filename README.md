@@ -10,6 +10,16 @@ A Python tool/library that extracts data from Consolidated Account Statement (CA
 
 ## Installation
 
+Install from [PyPI](https://pypi.org/project/processcaspdf/):
+
+```bash
+pip install processcaspdf
+# or
+uv add processcaspdf
+```
+
+### From source (for development)
+
 ```bash
 git clone https://github.com/ukkit/processCASpdf.git
 cd processCASpdf
@@ -88,6 +98,23 @@ uv run ruff format .
 uv run mypy processCASpdf.py
 uv run pre-commit install
 ```
+
+## Changelog
+
+### 0.3.2
+- Recognize IDCW/dividend transactions: `IDCW_PAYOUT` (cash payout, no units allotted) and `IDCW_REINVEST` (reinvested, same shape as a Buy) are now emitted instead of being silently dropped.
+- Add a `narration` field carrying the raw PDF transaction line text, so any row can be inspected even if a future statement format doesn't cleanly match the parser's patterns.
+- Fix the PyPI publish workflow, which was broken by a nonexistent `astral-sh/setup-uv@v10` action pin.
+
+### 0.3.1
+- Add PyPI packaging metadata (readme, authors, SPDX license, project URLs).
+- Fix license header/attribution to match `LICENSE` and credit the original `camspdf.py`.
+
+### 0.3.0
+- Refactor fund-name/ISIN extraction and trim irrelevant fund-name indicator patterns.
+- Add `_strip_registrar()` helper (CAMS/KFintech/Karvy) and remove duplicated cleanup logic.
+- Simplify `process()`, removing redundant ISIN-extraction fallback paths.
+- Rename CSV output prefix from `CAMS_data_` to `CAS_data_`.
 
 ## Credits
 
