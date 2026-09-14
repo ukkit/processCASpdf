@@ -31,7 +31,23 @@ logger = logging.getLogger(__name__)
 REGULAR_BUY_TXN = r"(?P<date>\d+\-\S+\-\d+)\s+(?P<txn>.*)\s+(?P<amount>[0-9]+\.[0-9]*)\s+(?P<units>[0-9]+\.[0-9]*)\s+(?P<nav>[0-9]+\.[0-9]*)\s+(?P<unitbalance>[0-9]+\.[0-9]*).*"
 REGULAR_SELL_TXN = r"(?P<date>\d+\-\S+\-\d+)\s+(?P<txn>.*)\s+(?P<amount>\([0-9]+\.[0-9]*\))\s+(?P<units>\([0-9]+\.[0-9]*\))\s+(?P<nav>[0-9]+\.[0-9]*)\s+(?P<unitbalance>[0-9]+\.[0-9]*).*"
 SEGR_BUY_TXN = r"(?P<date>\d+\-\S+\-\d+)\s+(?P<txn>.*)\s+(?P<units>[0-9]+\.[0-9]*)\s+(?P<unitbalance>[0-9]+\.[0-9]*).*"
+# IDCW/dividend payout: no units are allotted, so the line carries only a
+# trailing amount (no units/nav/balance columns) - e.g. "*** Stamp Duty ***"
+# and "*** STT Paid ***" rows have this same shape, so a match here is only
+# treated as a payout once the narration also passes _DIVIDEND_KEYWORD_RE.
+IDCW_PAYOUT_TXN = r"(?P<date>\d+\-\S+\-\d+)\s+(?P<txn>.*)\s+(?P<amount>[0-9]+\.[0-9]*)\s*$"
 FOLIO_PAN = r"^Folio No:\s+(?P<folio_num>.*)\s+PAN:\s+(?P<pan>[A-Z,0-9]{10})"
+
+# IDCW/dividend reinvestment has the identical 4-number shape as a regular
+# Buy (units ARE allotted), so it's detected by narration text on top of the
+# REGULAR_BUY_TXN match rather than a separate shape regex. Real CAMS/KFin
+# narration reads e.g. "Dividend @ Rs. 5.50 per unit" or "IDCW Reinvestment
+# @ Rs. 2.30 per unit". "reinvest" is checked as a separate substring search
+# rather than folded into one regex: a lazy .*? around an optional group
+# settles on the first match and never backtracks to populate it, so it can
+# silently miss "reinvest" depending on where it sits in the text.
+_DIVIDEND_KEYWORD_RE = re.compile(r"dividend|idcw", re.IGNORECASE)
+_REINVEST_KEYWORD_RE = re.compile(r"reinvest", re.IGNORECASE)
 
 # Fund name indicator patterns used to identify lines containing mutual fund names
 _FUND_NAME_PATTERNS = (
@@ -189,6 +205,7 @@ class _FundDetails:
     units: float
     nav: float
     balance_units: float
+    narration: str
 
 
 class _ProcessTextFile:
@@ -354,7 +371,11 @@ class _ProcessTextFile:
             m = re.match(REGULAR_BUY_TXN, eachline)
             if m:
                 date = m.groupdict().get("date", "")
-                txn = "Buy"
+                txn_text = m.groupdict().get("txn", "") or ""
+                if _DIVIDEND_KEYWORD_RE.search(txn_text) and _REINVEST_KEYWORD_RE.search(txn_text):
+                    txn = "IDCW_REINVEST"
+                else:
+                    txn = "Buy"
                 amount = float(m.groupdict().get("amount", 0))
                 units = float(m.groupdict().get("units", 0))
                 nav = float(m.groupdict().get("nav", 0))
@@ -371,6 +392,7 @@ class _ProcessTextFile:
                     units=units,
                     nav=nav,
                     balance_units=balance_units,
+                    narration=eachline.strip(),
                 )
                 self.alldata.append(t)
                 i += 1
@@ -398,6 +420,7 @@ class _ProcessTextFile:
                     units=units,
                     nav=nav,
                     balance_units=balance_units,
+                    narration=eachline.strip(),
                 )
                 self.alldata.append(t)
                 i += 1
@@ -423,10 +446,39 @@ class _ProcessTextFile:
                     units=units,
                     nav=nav,
                     balance_units=balance_units,
+                    narration=eachline.strip(),
                 )
                 self.alldata.append(t)
                 i += 1
                 continue
+
+            # IDCW/dividend payout: amount only, no units allotted. Shares
+            # this "one trailing number" shape with non-dividend rows like
+            # "*** Stamp Duty ***" and "*** STT Paid ***", so only treat it
+            # as a payout once the narration text also reads as a dividend.
+            m = re.match(IDCW_PAYOUT_TXN, eachline)
+            if m:
+                txn_text = m.groupdict().get("txn", "") or ""
+                if _DIVIDEND_KEYWORD_RE.search(txn_text):
+                    date = m.groupdict().get("date", "")
+                    amount = float(m.groupdict().get("amount", 0))
+
+                    t = _FundDetails(
+                        folio_num=folio_num,
+                        fund_name=fund_name,
+                        isin=isin,
+                        scheme_code=self.lnav.get_sch_code(isin),
+                        date=date,
+                        txn="IDCW_PAYOUT",
+                        amount=amount,
+                        units=0.0,
+                        nav=0.0,
+                        balance_units=0.0,
+                        narration=eachline.strip(),
+                    )
+                    self.alldata.append(t)
+                    i += 1
+                    continue
 
             # If we get here, we didn't match any pattern
             i += 1

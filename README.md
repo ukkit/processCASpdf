@@ -48,11 +48,12 @@ rec = pdf.get_pdf_data("dicts")  # returns list of dicts
 | `scheme_code` | str | AMFI scheme code; empty if lookup fails |
 | `folio_num` | str | Folio number |
 | `date` | str | Transaction date (e.g. `01-Jan-2025`) |
-| `txn` | str | `Buy` or `Sell` |
+| `txn` | str | `Buy`, `Sell`, `IDCW_PAYOUT`, or `IDCW_REINVEST` |
 | `amount` | float | Transaction amount (INR) |
-| `units` | float | Units transacted |
-| `nav` | float | NAV at time of transaction |
-| `balance_units` | float | Unit balance after transaction |
+| `units` | float | Units transacted (`0.0` for `IDCW_PAYOUT`, which allots no units) |
+| `nav` | float | NAV at time of transaction (`0.0` for `IDCW_PAYOUT`) |
+| `balance_units` | float | Unit balance after transaction (`0.0` for `IDCW_PAYOUT`, since it isn't printed on that row) |
+| `narration` | str | Raw transaction line text as it appeared in the PDF |
 
 ### Example
 
