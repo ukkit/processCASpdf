@@ -5,7 +5,7 @@
 #
 # Modified to extract fund name and ISIN from CAS statements that span multiple lines.
 #
-# Version: 0.3.1
+# Version: 0.3.2
 # Date: 2025-04-05
 # Copyright (c) 2025, Neeraj <@ukkit>
 #
